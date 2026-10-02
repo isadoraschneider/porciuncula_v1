@@ -1,0 +1,296 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Porciúncula - Realidade Aumentada</title>
+    <style>
+        body, html {
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            background-color: #f0f0f0;
+        }
+        model-viewer {
+            width: 100%;
+            height: 100%;
+            --progress-bar-color: #7a5c2e;
+        }
+        .header-title {
+            position: absolute;
+            top: 16px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: rgba(255, 255, 255, 0.9);
+            padding: 8px 16px;
+            border-radius: 20px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.2);
+            font-size: 14px;
+            font-weight: bold;
+            color: #333;
+            z-index: 10;
+            pointer-events: none;
+            text-align: center;
+            white-space: nowrap;
+        }
+
+        /* Botões comuns */
+        .botao {
+            display: block;
+            width: 100%;
+            padding: 15px 20px;
+            border: none;
+            border-radius: 30px;
+            font-family: inherit;
+            font-size: 16px;
+            font-weight: 600;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.25);
+        }
+        .botao.principal { background: #7a5c2e; color: #fff; }
+        .botao.principal:active { background: #5e4622; }
+        .botao.secundario { background: #fff; color: #5e4622; }
+        .botao.secundario:active { background: #ece6dc; }
+
+        /* As duas opções de entrada em AR (só aparecem em aparelhos compatíveis) */
+        #entrada {
+            position: absolute;
+            left: 16px;
+            right: 16px;
+            bottom: 24px;
+            margin: 0 auto;
+            max-width: 360px;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+            z-index: 10;
+        }
+        #entrada[hidden] { display: none; }
+        #dica {
+            margin: 2px 0 0;
+            font-size: 12px;
+            line-height: 1.35;
+            color: #555;
+            text-align: center;
+        }
+        #dica:empty { display: none; }
+
+        /* Avisos (carregando, erro, AR indisponível) */
+        #status {
+            position: absolute;
+            left: 16px;
+            right: 16px;
+            bottom: 28px;
+            margin: 0 auto;
+            max-width: 420px;
+            padding: 12px 16px;
+            border-radius: 12px;
+            background: rgba(255, 255, 255, 0.95);
+            box-shadow: 0 2px 8px rgba(0,0,0,0.2);
+            color: #333;
+            font-size: 14px;
+            line-height: 1.4;
+            text-align: center;
+            z-index: 11;
+        }
+        #status[hidden] { display: none; }
+        #status.erro { background: #fdecea; color: #8a1c13; }
+
+        /* Painel que aparece DENTRO da realidade aumentada (Android/Chrome) */
+        #ar-painel {
+            display: none;
+            position: absolute;
+            left: 16px;
+            right: 16px;
+            bottom: 32px;
+            margin: 0 auto;
+            max-width: 320px;
+            flex-direction: column;
+            align-items: center;
+            gap: 10px;
+        }
+        model-viewer[ar-status="session-started"] #ar-painel,
+        model-viewer[ar-status="object-placed"] #ar-painel { display: flex; }
+        #ar-escala {
+            padding: 6px 14px;
+            border-radius: 16px;
+            background: rgba(0, 0, 0, 0.6);
+            color: #fff;
+            font-size: 13px;
+            font-weight: 600;
+        }
+        #ar-reset[hidden] { display: none; }
+    </style>
+    <!-- Biblioteca model-viewer do Google (versão fixa: o botão de escala depende dela) -->
+    <script type="module" src="https://ajax.googleapis.com/ajax/libs/model-viewer/4.0.0/model-viewer.min.js"></script>
+</head>
+<body>
+
+    <div class="header-title">Igreja da Porciúncula</div>
+
+    <model-viewer
+        id="viewer"
+        src="porciuncula.glb"
+        ios-src="porciuncula.usdz"
+        ar
+        ar-modes="webxr scene-viewer quick-look"
+        ar-scale="fixed"
+        ar-placement="floor"
+        camera-controls
+        auto-rotate
+        touch-action="pan-y"
+        tone-mapping="neutral"
+        shadow-intensity="1"
+        alt="Modelo 3D da Igreja da Porciúncula">
+
+        <!-- Esconde o botão de AR padrão; usamos os dois botões abaixo -->
+        <div slot="ar-button" hidden></div>
+
+        <!-- Visível somente durante a sessão de AR -->
+        <div id="ar-painel">
+            <div id="ar-escala">Escala real (1:1)</div>
+            <button id="ar-reset" class="botao principal" hidden>Ver na escala 1:1</button>
+        </div>
+    </model-viewer>
+
+    <div id="entrada" hidden>
+        <button id="btn-real" class="botao principal">Ver em escala real (1:1)</button>
+        <button id="btn-ajuste" class="botao secundario">Ver com ajuste de tamanho</button>
+        <p id="dica"></p>
+    </div>
+
+    <div id="status">Carregando o modelo…</div>
+
+    <script>
+        const viewer = document.getElementById('viewer');
+        const statusEl = document.getElementById('status');
+        const entrada = document.getElementById('entrada');
+        const dica = document.getElementById('dica');
+        const arEscala = document.getElementById('ar-escala');
+        const arReset = document.getElementById('ar-reset');
+
+        let modoAjustavel = false;
+        let monitor = null;
+
+        const ehIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) ||
+            (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+
+        function aviso(texto, erro) {
+            statusEl.textContent = texto;
+            statusEl.classList.toggle('erro', !!erro);
+            statusEl.hidden = !texto;
+        }
+
+        // ---------- Carregamento ----------
+
+        // Se a biblioteca não carregar em 15 s, avisa em vez de ficar em branco
+        setTimeout(function () {
+            if (!customElements.get('model-viewer')) {
+                aviso('Não foi possível carregar o visualizador 3D. Verifique a internet e recarregue a página.', true);
+            }
+        }, 15000);
+
+        viewer.addEventListener('progress', function (e) {
+            const p = Math.round((e.detail.totalProgress || 0) * 100);
+            if (p < 100) aviso('Carregando o modelo… ' + p + '%');
+        });
+
+        viewer.addEventListener('error', function (e) {
+            const tipo = (e.detail && e.detail.type) || 'desconhecido';
+            aviso('Erro ao carregar o modelo (' + tipo + '). Recarregue a página.', true);
+        });
+
+        viewer.addEventListener('load', function () {
+            // A verificação de suporte a AR é assíncrona: confere por alguns segundos
+            let tentativas = 0;
+            const timer = setInterval(function () {
+                tentativas++;
+                if (viewer.canActivateAR) {
+                    clearInterval(timer);
+                    aviso('');
+                    dica.textContent = ehIOS
+                        ? 'No modo com ajuste, use dois dedos para redimensionar e toque duas vezes na igreja para voltar a 100%.'
+                        : 'No modo com ajuste, use dois dedos para redimensionar.';
+                    entrada.hidden = false;
+                } else if (tentativas >= 8) {
+                    clearInterval(timer);
+                    aviso('Realidade aumentada indisponível aqui. Abra este link direto no Safari (iPhone) ou no Chrome (Android). No Android é preciso ter o app "Google Play Services para RA" instalado.');
+                }
+            }, 500);
+        });
+
+        // ---------- Entrada em AR: as duas opções ----------
+
+        async function entrarAR(ajustavel) {
+            modoAjustavel = ajustavel;
+            // "fixed" trava em 1:1; "auto" libera o gesto de pinça
+            viewer.setAttribute('ar-scale', ajustavel ? 'auto' : 'fixed');
+            try { await viewer.updateComplete; } catch (e) {}
+            viewer.activateAR();
+        }
+
+        document.getElementById('btn-real').addEventListener('click', function () { entrarAR(false); });
+        document.getElementById('btn-ajuste').addEventListener('click', function () { entrarAR(true); });
+
+        // ---------- Dentro da AR (Android/Chrome): escala atual e botão 1:1 ----------
+
+        // Acessa partes internas do model-viewer 4.0.0 para ler e redefinir a escala
+        function simbolo(obj, nome) {
+            for (let o = obj; o; o = Object.getPrototypeOf(o)) {
+                const s = Object.getOwnPropertySymbols(o).find(function (x) { return x.description === nome; });
+                if (s) return s;
+            }
+            return null;
+        }
+        function internos() {
+            try {
+                const cena = viewer[simbolo(viewer, 'scene')];
+                const renderizador = viewer[simbolo(viewer, 'renderer')];
+                if (cena && cena.pivot && renderizador && renderizador.arRenderer) {
+                    return { cena: cena, ar: renderizador.arRenderer };
+                }
+            } catch (e) {}
+            return null;
+        }
+
+        function atualizarPainel() {
+            const i = internos();
+            if (!i) return;
+            const escala = i.cena.pivot.scale.x;
+            const foraDeEscala = Math.abs(escala - 1) > 0.005;
+            arEscala.textContent = foraDeEscala
+                ? 'Escala: ' + Math.round(escala * 100) + '% do tamanho real'
+                : 'Escala real (1:1)';
+            arReset.hidden = !(modoAjustavel && foraDeEscala);
+        }
+
+        arReset.addEventListener('click', function () {
+            const i = internos();
+            if (i) i.ar.goalScale = 1;   // o modelo volta suavemente ao tamanho real
+        });
+
+        // Evita que o toque no painel seja interpretado como toque no modelo
+        document.getElementById('ar-painel').addEventListener('beforexrselect', function (e) { e.preventDefault(); });
+
+        viewer.addEventListener('ar-status', function (e) {
+            const estado = e.detail.status;
+            if (estado === 'session-started') {
+                const i = internos();
+                if (i) i.cena.canScale = modoAjustavel;
+                clearInterval(monitor);
+                monitor = setInterval(atualizarPainel, 150);
+            } else if (estado === 'not-presenting') {
+                clearInterval(monitor);
+                monitor = null;
+                arReset.hidden = true;
+            } else if (estado === 'failed') {
+                clearInterval(monitor);
+                aviso('Não foi possível iniciar a realidade aumentada neste aparelho.', true);
+            }
+        });
+    </script>
+
+</body>
+</html>
